@@ -1,0 +1,108 @@
+# Home energy meter: SCT-013-000 CT -> ESP32 ADC -> ESPHome -> Home Assistant
+# Same circuit as the Instructables project (burden + 2x100k bias divider + 10uF),
+# but powered from 3.3 V, so the burden resistor must be smaller (see README).
+
+substitutions:
+  name: energy-meter
+  friendly_name: Enerji Sayacı
+  ct_pin: GPIO34            # ADC1 pin (ADC2 does not work while Wi-Fi is on)
+  mains_voltage: "230"      # Türkiye nominal; voltage is not measured
+  # Amps per volt-RMS at the ADC = CT turns / burden ohms
+  # SCT-013-000 = 2000 turns; 22 ohm burden -> 2000/22 = 90.9
+  ct_amps_per_volt: "90.9"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret api_encryption_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${name}-fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+sensor:
+  - platform: adc
+    id: ct_adc
+    pin: ${ct_pin}
+    attenuation: 12db
+    update_interval: never   # sampled by ct_clamp
+
+  - platform: ct_clamp
+    sensor: ct_adc
+    id: ct_current
+    name: "Akım"
+    sample_duration: 200ms   # 10 periods at 50 Hz
+    update_interval: 5s
+    accuracy_decimals: 2
+    filters:
+      - multiply: ${ct_amps_per_volt}
+      # noise floor: below ~0.05 A the reading is ADC noise
+      - lambda: |-
+          return x < 0.05 ? 0.0f : x;
+
+  - platform: template
+    id: power_w
+    name: "Güç (görünür, tahmini)"
+    unit_of_measurement: W
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+    update_interval: 5s
+    lambda: return id(ct_current).state * ${mains_voltage};
+
+  - platform: integration
+    id: energy_kwh
+    name: "Enerji"
+    sensor: power_w
+    time_unit: h
+    integration_method: trapezoid
+    restore: true
+    unit_of_measurement: kWh
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: total_daily_energy
+    name: "Bugünkü enerji"
+    power_id: power_w
+    restore: true
+    unit_of_measurement: kWh
+    device_class: energy
+    state_class: total_increasing
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: wifi_signal
+    name: "Wi-Fi sinyal"
+    update_interval: 60s
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+button:
+  - platform: restart
+    name: "Yeniden başlat"
